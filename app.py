@@ -13,11 +13,13 @@ load_dotenv()
 print(f"DEBUG: API Key loaded: {os.getenv('OPENROUTER_API_KEY') is not None}")
 pn.extension()
 
-# Initialize the Panel extension for frontend components
-pn.extension()
+# Agent Configuration: Define stable free models to iterate through if one fails
+MODELS_POOL = [
+    "openai/gpt-oss-20b:free",
+    "cohere/north-mini-code:free",
+    "meta-llama/llama-3.2-3b-instruct:free"
+]
 
-# Agent Configuration: Define the specific DeepSeek model and system behavior
-MODEL_NAME = "qwen/qwen3-coder:free" # use another free model if this one is busy
 SYSTEM_PROMPT = """
 You are an expert Python debugging assistant. 
 Do not include your internal reasoning or chain-of-thought process in the final output 
@@ -39,18 +41,12 @@ Return your answer using these Markdown sections:
 ## Improvements
 """
 
-# Initialize OpenRouter Client pointing to their API base URL
-# Hugging Face Spaces host your app on public cloud servers. When querying an external router API like OpenRouter 
-# from a headless server without identifying your app, OpenRouter's firewalls will sometimes flag 
-# the bulk automated requests and silent-drop the connection.
-
+# Initialize OpenRouter Client with explicit identification headers
 client = OpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
     base_url="https://openrouter.ai/api/v1",
-    # OpenRouter explicitly asks web apps to pass identification headers. 
-    # This prevents their firewall from blocking server hosts like Hugging Face.
     default_headers={
-        "HTTP-Referer": "https://huggingface.co/spaces/seanwhs/AI-Enabled-Python-Debugger", # Your Hugging Face Space URL
+        "HTTP-Referer": "https://huggingface.co/spaces/seanwhs/AI-Enabled-Python-Debugger",
         "X-Title": "AI Enabled Python Debugger"
     }
 )
@@ -64,44 +60,43 @@ conversation_messages = [
 ]
 
 # Step 1. Write Logic
-def debug_code_stream(code: str, instance: None):
+def debug_code_stream(code: str, instance: None = None):
     """
     Generator that yields chunks of the model's response as they arrive,
-    while preserving conversation history.
+    while iterating through a fallback pool if rate limits are hit.
     """
-    # Append the user's code to the conversation history for context
-    conversation_messages.append(
-        {
-            'role': 'user',
-            'content': code,
-        }
-    )
+    conversation_messages.append({'role': 'user', 'content': code})
     
-    # Request a streaming response from the model
-    stream = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=conversation_messages,
-        stream=True, # tells the API to send chunks instead of one big response
-    )
-    
-    full_reply = ''  # Buffer to store the complete response
-    
-    # Process chunks as they arrive from the API
+    stream = None
+    # Try each model in the pool sequentially if an error occurs (like a 429)
+    for model in MODELS_POOL:
+        try:
+            stream = client.chat.completions.create(
+                model=model,
+                messages=conversation_messages,
+                max_tokens=2048,
+                stream=True
+            )
+            break  # Successfully acquired a stream, break out of the loop
+        except Exception as e:
+            print(f"Model {model} failed with error: {e}. Trying next fallback...")
+            continue
+            
+    if not stream:
+        yield "⚠️ **Error:** All free OpenRouter endpoints are currently swamped or unavailable. Please try again in a few moments."
+        return
+
+    full_reply = ''
+    # Process and yield chunks as they arrive from the working API connection
     for chunk in stream:
-        delta = chunk.choices[0].delta
-        if delta and delta.content:
-            text = delta.content
-            full_reply += text  # Concatenate the current chunk to our full buffer
-            yield text  # makes this a generator, so you can iterate over chunks
+        if chunk.choices[0].delta.content:
+            text = chunk.choices[0].delta.content
+            full_reply += text
+            yield text
             
     # Store the final full AI response in history to maintain context
-    conversation_messages.append(
-        {
-            'role': 'assistant',
-            'content': full_reply
-        }
-    )
-    
+    conversation_messages.append({'role': 'assistant', 'content': full_reply})
+
 # Step 2. Create Widgets
 code_input = pn.widgets.CodeEditor(
     name = 'Python Code',
