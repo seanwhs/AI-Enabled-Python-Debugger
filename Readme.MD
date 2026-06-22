@@ -37,6 +37,19 @@ If you want to view my debugger as a regular, full-screen web application withou
 
 > 💡 **Pro-Tip:** You can also find this direct link at any time from my main Space page by clicking the three vertical dots (**⋮**) in the top right corner, selecting **Embed this Space**, and copying the **Direct URL**.
 
+### 💤 Troubleshooting: What if the direct link is blank? (The Wake-Up Trick 🪄)
+
+When a Hugging Face Space goes to sleep after a period of inactivity, visiting my direct subdomain link (`.hf.space`) usually results in a blank page or a timeout error because there is no container running to handle your request.
+
+To wake up my Space completely on your own—without needing to log in, restart anything, or mess with settings—you just have to poke Hugging Face's main gateway:
+
+1. Simply visit my main dashboard link instead of the direct link: [https://huggingface.co/spaces/seanwhs/AI-Enabled-Python-Debugger](https://huggingface.co/spaces/seanwhs/AI-Enabled-Python-Debugger)
+2. **What happens behind the scenes:** Just by landing on this page, your browser sends a request to Hugging Face's servers saying, *"Hey, someone wants to look at this project."*
+3. Hugging Face will immediately change the status badge at the top from **"Sleeping"** to **"Awaking"** or **"Running"**.
+4. Once that status badge turns green and reads **"Running"** (which usually takes about 10–30 seconds), my direct link (`.hf.space`) will instantly work again if you refresh it.
+
+**Can anyone wake it up?** **Yes!** If you share the main link with a student, a colleague, or a friend, their visit will automatically wake up the app too. They do not need to be logged into my account. The moment a user hits that main dashboard URL, Hugging Face spins my container back up.
+
 ---
 
 # Features
@@ -122,19 +135,18 @@ python -m venv .venv
 Activate it:
 
 * **Windows:**
+
 ```bash
 .venv\Scripts\activate
 
 ```
 
-
 * **Linux / macOS:**
+
 ```bash
 source .venv/bin/activate
 
 ```
-
-
 
 Install the dependencies:
 
