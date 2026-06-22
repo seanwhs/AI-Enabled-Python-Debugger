@@ -40,9 +40,19 @@ Return your answer using these Markdown sections:
 """
 
 # Initialize OpenRouter Client pointing to their API base URL
+# Hugging Face Spaces host your app on public cloud servers. When querying an external router API like OpenRouter 
+# from a headless server without identifying your app, OpenRouter's firewalls will sometimes flag 
+# the bulk automated requests and silent-drop the connection.
+
 client = OpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
     base_url="https://openrouter.ai/api/v1",
+    # OpenRouter explicitly asks web apps to pass identification headers. 
+    # This prevents their firewall from blocking server hosts like Hugging Face.
+    default_headers={
+        "HTTP-Referer": "https://huggingface.co/spaces/seanwhs/AI-Enabled-Python-Debugger", # Your Hugging Face Space URL
+        "X-Title": "AI Enabled Python Debugger"
+    }
 )
 
 # Initialize conversation history with the system role to set the AI's persona
