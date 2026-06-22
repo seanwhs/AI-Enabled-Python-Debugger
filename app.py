@@ -110,27 +110,33 @@ code_input = pn.widgets.CodeEditor(
     
 debug_button = pn.widgets.Button(
     name = 'Debug Code',
-    button_type = 'default',
+    button_type = 'primary', # Changed to primary accent color for clearer call-to-action
+    sizing_mode = 'stretch_width'
 )
 
 followup_input = pn.widgets.TextInput(
-    name = 'Follow-Up-Question',
+    name = 'Follow-Up Question',
     placeholder = 'Ask a question about the previous analysis...',
+    sizing_mode = 'stretch_width'
 )
 
 followup_button = pn.widgets.Button(
     name = 'Ask Follow-Up',
     button_type = 'light',
+    sizing_mode = 'stretch_width'
 )
 
 reset_button = pn.widgets.Button(
     name = 'Reset Conversation',
     button_type = 'danger',
+    sizing_mode = 'stretch_width'
 )
 
+# FIXED: Removed hardcoded height = 400 so the component dynamically grows with content length
 output = pn.pane.Markdown(
-    'AI Analysis:',
-    height = 400,
+    '### AI Analysis will appear here...',
+    sizing_mode = 'stretch_width',
+    margin = (15, 5, 15, 5)
 )
     
 # Step 3: Define Event Handlers (The "Glue" between logic and UI)
@@ -187,17 +193,19 @@ debug_button.on_click(on_click)
 followup_button.on_click(on_followup)
 reset_button.on_click(on_reset)
 
-# Step 4: Define Layout (Stack Components)
+# Step 4: Define Layout (Stack Components fluidly)
 app = pn.Column(
-"# AI Python Debugger",
-code_input,
-debug_button,
-output,
-"## Follow-up",
-followup_input,
-followup_button,
-reset_button,
-width=800,
+    "# 🐍 AI Python Debugger",
+    code_input,
+    debug_button,
+    pn.layout.Divider(), # Visual separation before output
+    output,
+    pn.layout.Divider(), # Visual separation after output
+    "## 💬 Follow-up Conversation",
+    followup_input,
+    pn.Row(followup_button, reset_button), # Placed bottom action buttons side-by-side
+    width=800,
+    sizing_mode='stretch_width'
 )
 
 # Step 5: Serve
