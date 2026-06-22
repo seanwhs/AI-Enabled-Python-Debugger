@@ -17,7 +17,7 @@ pn.extension()
 pn.extension()
 
 # Agent Configuration: Define the specific DeepSeek model and system behavior
-MODEL_NAME = "openrouter/free" # use another free model if this one is busy
+MODEL_NAME = "qwen/qwen3-coder:free" # use another free model if this one is busy
 SYSTEM_PROMPT = """
 You are an expert Python debugging assistant. 
 Do not include your internal reasoning or chain-of-thought process in the final output 
