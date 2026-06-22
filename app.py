@@ -11,7 +11,10 @@ load_dotenv()
 
 # Debug: check if the variable is loaded
 print(f"DEBUG: API Key loaded: {os.getenv('OPENROUTER_API_KEY') is not None}")
-pn.extension()
+
+# Initialize the Panel extension explicitly loading 'codeeditor' assets 
+# to prevent WebSocket timeouts on headless hosting setups like Hugging Face
+pn.extension('codeeditor')
 
 # Agent Configuration: Define stable free models to iterate through if one fails
 MODELS_POOL = [
