@@ -39,41 +39,68 @@ Return your answer using these Markdown sections:
 """
 
 
-DIAGRAM_SYSTEM_PROMPT = """You are a software architecture expert.
-Generate TWO ASCII architecture diagrams using box-drawing characters.
-Label the first "=== Buggy Code Flow ===" and the second "=== Fixed Code Flow ===".
+DIAGRAM_SYSTEM_PROMPT = """You are a software process expert.
+Generate TWO ASCII flow charts using box-drawing characters that represent algorithmic control flow rather than static architectural components.
+Label the first "=== Buggy Code Flow =" and the second "= Fixed Code Flow ===".
 
-Draw each diagram using only these characters:
-  +-------+   for box corners and edges
-  |       |   for vertical sides
-  +-->    |   for arrows between boxes
-  ^       v   for vertical arrows
+Use these symbols for flow logic:
++-------+   for process steps
+<       >   for decision diamonds
++-->        for horizontal paths
+|           for vertical paths
+v           for directional flow
 
 Example style:
-  +------------------+       +------------------+
-  | Input            |  -->  | Process          |
-  +------------------+       +------------------+
-                                      |
-                                      v
-                             +------------------+
-                             | Output           |
-                             +------------------+
++-----------+
+| Initialize|
++-----+-----+
+|
+v
++-----+-----+       +-----------+
+|   Loop    +------>| Process   |
++-----+-----+       +-----+-----+
+|                   |
+v                   v
++-----------+       +-----------+
+|  Finish   |<------+   Done    |
++-----------+       +-----------+
 
 Wrap each diagram in a triple-backtick plain code block.
 Do not add any prose or explanation outside the two code blocks.
 """
 
-
 MODELS_POOL = [
+    # OpenAI
     "openai/gpt-oss-20b:free",
-    "cohere/north-mini-code:free",
-    "meta-llama/llama-3.2-3b-instruct:free",
-]
 
+    # Qwen
+    "qwen/qwen3-coder:free",
+
+    # Google
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+
+    # NVIDIA
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+
+    # Poolside
+    "poolside/laguna-xs.2:free",
+
+    # Nous Research
+    "nousresearch/hermes-3-llama-3.1-405b:free",
+
+    # Meta
+    "meta-llama/llama-3.3-70b-instruct:free",
+
+    # Z AI
+    "z-ai/glm-4.5-air:free",
+
+    # OpenAI (larger)
+    "openai/gpt-oss-120b:free",
+]
 
 SESSION_KEY = "session_id"  # Session identifier used by Panel
 DEFAULT_SESSION = "default"  # Fallback session id
-
 
 PANE_STYLE = {
     "font-size": "20px",
