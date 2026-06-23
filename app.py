@@ -1,42 +1,31 @@
-# app.py
-import os  # Used to access environment variables
+import os
+import threading
+from dotenv import load_dotenv
 
-import panel as pn  # Framework for building the chat UI
+import panel as pn
+from openai import OpenAI
+from tornado.websocket import WebSocketClosedError
+from tornado.iostream import StreamClosedError
 
-from dotenv import load_dotenv  # Loads variables from a .env file
-from openai import OpenAI  # Client library to interact with OpenRouter/OpenAI API
-
-# Load Configuration from .env file
 load_dotenv()
 
-# Debug: check if the variable is loaded
-print(f"DEBUG: API Key loaded: {os.getenv('OPENROUTER_API_KEY') is not None}")
+pn.extension("codeeditor", sizing_mode="stretch_width", design="bootstrap")
 
-# Initialize the Panel extension explicitly loading 'codeeditor' assets 
-# to prevent WebSocket timeouts on headless hosting setups like Hugging Face
-pn.extension('codeeditor')
-
-# Agent Configuration: Define stable free models to iterate through if one fails
 MODELS_POOL = [
     "openai/gpt-oss-20b:free",
     "cohere/north-mini-code:free",
-    "meta-llama/llama-3.2-3b-instruct:free"
+    "meta-llama/llama-3.2-3b-instruct:free",
 ]
 
 SYSTEM_PROMPT = """
-You are an expert Python debugging assistant. 
-Do not include your internal reasoning or chain-of-thought process in the final output 
-unless requested.
-
+You are an expert Python debugging assistant.
 When given Python code:
-
 1. Identify the bug.
 2. Explain the root cause.
 3. Provide fixed code.
 4. Suggest unit tests.
 
 Return your answer using these Markdown sections:
-
 ## Error
 ## Explanation
 ## Fixed Code
@@ -44,169 +33,167 @@ Return your answer using these Markdown sections:
 ## Improvements
 """
 
-# Initialize OpenRouter Client with explicit identification headers
+DIAGRAM_SYSTEM_PROMPT = """
+You are a software architecture expert.
+Generate TWO ASCII flowcharts, each wrapped in triple-backtick fenced code blocks.
+Label the first "Buggy Code Flow" and the second "Fixed Code Flow" inside the block.
+Use only ASCII characters: [], -->, |, and spaces for indentation.
+Do not add any prose, headers, or explanation outside the two code blocks.
+
+Example format:
+```
+Buggy Code Flow
+[Start] --> [Step A] --> [Buggy Step] --> [End]
+```
+
+```
+Fixed Code Flow
+[Start] --> [Step A] --> [Fixed Step] --> [End]
+```
+"""
+
 client = OpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
     base_url="https://openrouter.ai/api/v1",
     default_headers={
         "HTTP-Referer": "https://huggingface.co/spaces/seanwhs/AI-Enabled-Python-Debugger",
-        "X-Title": "AI Enabled Python Debugger"
-    }
+        "X-Title": "AI Enabled Python Debugger",
+    },
 )
 
-# Initialize conversation history with the system role to set the AI's persona
-conversation_messages = [
-    {
-        'role': 'system', 
-        'content': SYSTEM_PROMPT
-    }
-]
 
-# Step 1. Write Logic
-def debug_code_stream(code: str, instance: None = None):
-    """
-    Generator that yields chunks of the model's response as they arrive,
-    while iterating through a fallback pool if rate limits are hit.
-    """
-    conversation_messages.append({'role': 'user', 'content': code})
-    
-    stream = None
-    # Try each model in the pool sequentially if an error occurs (like a 429)
+def safe_set(pane, text: str) -> bool:
+    try:
+        pane.object = text
+        return True
+    except (WebSocketClosedError, StreamClosedError):
+        return False
+
+
+def call_llm(messages, stream=False):
+    last_error = None
     for model in MODELS_POOL:
         try:
-            stream = client.chat.completions.create(
-                model=model,
-                messages=conversation_messages,
-                max_tokens=2048,
-                stream=True
+            return client.chat.completions.create(
+                model=model, messages=messages, max_tokens=2048, stream=stream
             )
-            break  # Successfully acquired a stream, break out of the loop
         except Exception as e:
-            print(f"Model {model} failed with error: {e}. Trying next fallback...")
-            continue
-            
-    if not stream:
-        yield "⚠️ **Error:** All free OpenRouter endpoints are currently swamped or unavailable. Please try again in a few moments."
-        return
+            last_error = e
+    raise RuntimeError(f"All models failed: {last_error}")
 
-    full_reply = ''
-    # Process and yield chunks as they arrive from the working API connection
-    for chunk in stream:
-        if chunk.choices[0].delta.content:
-            text = chunk.choices[0].delta.content
-            full_reply += text
-            yield text
-            
-    # Store the final full AI response in history to maintain context
-    conversation_messages.append({'role': 'assistant', 'content': full_reply})
 
-# Step 2. Create Widgets
+def stream_to_pane(messages: list, pane):
+    def _run():
+        try:
+            stream = call_llm(messages, stream=True)
+        except Exception as e:
+            safe_set(pane, f"**Error:** {e}")
+            return
+        full = ""
+        try:
+            for chunk in stream:
+                bit = getattr(chunk.choices[0].delta, "content", None)
+                if bit:
+                    full += bit
+                    if not safe_set(pane, full):
+                        return
+        except (WebSocketClosedError, StreamClosedError):
+            return
+        messages.append({"role": "assistant", "content": full})
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def get_conv() -> list:
+    sid = pn.state.session_args.get("session_id", ["default"])[0]
+    if sid not in pn.state.cache:
+        pn.state.cache[sid] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    return pn.state.cache[sid]
+
+
+# ── Widgets ────────────────────────────────────────────────────────────────────
+
 code_input = pn.widgets.CodeEditor(
-    name = 'Python Code',
-    language = 'python',
-    height = 350,
-    sizing_mode = 'stretch_width',
-)
-    
-debug_button = pn.widgets.Button(
-    name = 'Debug Code',
-    button_type = 'primary', # Changed to primary accent color for clearer call-to-action
-    sizing_mode = 'stretch_width'
+    language="python", height=300, theme="monokai",
+    sizing_mode="stretch_width", margin=(10, 0, 15, 0),
 )
 
-followup_input = pn.widgets.TextInput(
-    name = 'Follow-Up Question',
-    placeholder = 'Ask a question about the previous analysis...',
-    sizing_mode = 'stretch_width'
-)
+OUTPUT_STYLE = {"font-size": "20px", "line-height": "1.9", "width": "100%"}
 
-followup_button = pn.widgets.Button(
-    name = 'Ask Follow-Up',
-    button_type = 'light',
-    sizing_mode = 'stretch_width'
-)
+output        = pn.pane.Markdown("_Analysis will appear here..._",  sizing_mode="stretch_width", styles=OUTPUT_STYLE)
+diagram_output= pn.pane.Markdown("_Diagrams will appear here..._",  sizing_mode="stretch_width", styles=OUTPUT_STYLE)
+followup_input= pn.widgets.TextInput(placeholder="Ask a follow-up question...", sizing_mode="stretch_width",
+                                     styles={"font-size": "18px"})
 
-reset_button = pn.widgets.Button(
-    name = 'Reset Conversation',
-    button_type = 'danger',
-    sizing_mode = 'stretch_width'
-)
+BTN_STYLE = {"font-size": "18px"}
+debug_btn    = pn.widgets.Button(name="⚡ Debug",          button_type="primary", width=200, height=50, styles=BTN_STYLE)
+diagram_btn  = pn.widgets.Button(name="📊 Diagram",        button_type="warning", width=200, height=50, styles=BTN_STYLE)
+followup_btn = pn.widgets.Button(name="💬 Follow-Up",      button_type="success", width=200, height=50, styles=BTN_STYLE)
+reset_btn    = pn.widgets.Button(name="🗑️ Reset",          button_type="danger",  width=200, height=50, styles=BTN_STYLE)
 
-# FIXED: Removed hardcoded height = 400 so the component dynamically grows with content length
-output = pn.pane.Markdown(
-    '### AI Analysis will appear here...',
-    sizing_mode = 'stretch_width',
-    margin = (15, 5, 15, 5)
-)
-    
-# Step 3: Define Event Handlers (The "Glue" between logic and UI)
-def on_click(event):
+
+# ── Handlers ───────────────────────────────────────────────────────────────────
+
+def on_debug(e):
     code = code_input.value.strip()
-
     if not code:
-        output.object = "Please enter some Python code."
-        return
+        safe_set(output, "Please enter some Python code."); return
+    conv = get_conv()
+    conv.append({"role": "user", "content": code})
+    safe_set(output, "_Analyzing…_")
+    stream_to_pane(conv, output)
 
-    output.object = "Analyzing...\n"
-
-    try:
-        full_text = ""
-        for chunk in debug_code_stream(code, None):
-            full_text += chunk
-            output.object = full_text
-    except Exception as e:
-        output.object = f"Error: {e}"
-
-
-def on_followup(event):
-    question = followup_input.value.strip()
-
-    if not question:
-        output.object = "Please enter a follow-up question."
-        return
-
-    output.object = "Thinking about your follow-up...\n"
-
-    try:
-        full_text = ""
-        for chunk in debug_code_stream(question, None):
-            full_text += chunk
-            output.object = full_text
-    except Exception as e:
-        output.object = f"Error: {e}"
-
-
-def on_reset(event):
-    global conversation_messages
-    conversation_messages = [
-        {
-            "role": "system",
-            "content": SYSTEM_PROMPT,
-        }
+def on_diagram(e):
+    code = code_input.value.strip()
+    if not code:
+        safe_set(diagram_output, "Please enter some Python code first."); return
+    conv = get_conv()
+    last = next((m["content"] for m in reversed(conv) if m["role"] == "assistant"), None)
+    payload = [
+        {"role": "system", "content": DIAGRAM_SYSTEM_PROMPT},
+        {"role": "user", "content": f"Code:\n```python\n{code}\n```" + (f"\n\nAnalysis:\n{last}" if last else "")},
     ]
-    output.object = "Conversation reset. Paste new code to start a fresh analysis."
+    safe_set(diagram_output, "_Generating diagrams…_")
+    stream_to_pane(payload, diagram_output)
+
+def on_followup(e):
+    q = followup_input.value.strip()
+    if not q:
+        safe_set(output, "Please enter a question."); return
+    conv = get_conv()
+    conv.append({"role": "user", "content": q})
+    safe_set(output, "_Thinking…_")
+    stream_to_pane(conv, output)
+
+def on_reset(e):
+    sid = pn.state.session_args.get("session_id", ["default"])[0]
+    pn.state.cache[sid] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    safe_set(output, "_Analysis will appear here..._")
+    safe_set(diagram_output, "_Diagrams will appear here..._")
     followup_input.value = ""
     code_input.value = ""
 
+debug_btn.on_click(on_debug)
+diagram_btn.on_click(on_diagram)
+followup_btn.on_click(on_followup)
+reset_btn.on_click(on_reset)
 
-debug_button.on_click(on_click)
-followup_button.on_click(on_followup)
-reset_button.on_click(on_reset)
+# ── Layout ─────────────────────────────────────────────────────────────────────
 
-# Step 4: Define Layout (Stack Components fluidly)
 app = pn.Column(
-    "# 🐍 AI Python Debugger",
+    pn.pane.Markdown("# 🐍 AI Python Debugger", styles={"font-size": "32px"}),
     code_input,
-    debug_button,
-    pn.layout.Divider(), # Visual separation before output
+    pn.Row(debug_btn, diagram_btn),
+    pn.layout.Divider(),
+    pn.pane.Markdown("## Analysis", styles={"font-size": "24px"}),
     output,
-    pn.layout.Divider(), # Visual separation after output
-    "## 💬 Follow-up Conversation",
+    pn.layout.Divider(),
+    pn.pane.Markdown("## Diagrams", styles={"font-size": "24px"}),
+    diagram_output,
+    pn.layout.Divider(),
+    pn.pane.Markdown("## Follow-up", styles={"font-size": "24px"}),
     followup_input,
-    pn.Row(followup_button, reset_button), # Placed bottom action buttons side-by-side
-    width=800,
-    sizing_mode='stretch_width'
+    pn.Row(followup_btn, reset_btn),
+    sizing_mode="stretch_width",
 )
 
-# Step 5: Serve
 app.servable()
