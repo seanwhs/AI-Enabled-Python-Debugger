@@ -38,6 +38,24 @@ Return your answer using these Markdown sections:
 ## Improvements
 """
 
+ENGINEERING_NOTE_PROMPT = """You are an expert software engineer writing concise engineering notes.
+
+Create a professional engineering note for the fixed code with these sections:
+## Title
+## Problem Summary
+## Root Cause
+## Fix Applied
+## Validation
+## Notes
+
+Rules:
+- Write in clear, formal engineering language.
+- Focus on the corrected behavior and why the fix works.
+- Keep it practical and implementation-focused.
+- Mention any edge cases or follow-up improvements if relevant.
+- Do not include fluff or generic advice.
+- Use a title appropriate for a technical postmortem or internal engineering note.
+"""
 
 DIAGRAM_SYSTEM_PROMPT = """You are a software process expert.
 Generate TWO ASCII flow charts using box-drawing characters that represent algorithmic control flow rather than static architectural components.
@@ -229,6 +247,87 @@ def generate_text(messages: list) -> str:
     resp = call_llm(messages, stream=False)
     return resp.choices[0].message.content or ""
 
+def generate_engineering_note(code: str, analysis: str, diagrams: str) -> str:
+    messages = [
+        {"role": "system", "content": ENGINEERING_NOTE_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Fixed code:\n```python\n{code}\n```\n\n"
+                f"Analysis:\n{analysis}\n\n"
+                f"Diagrams:\n{diagrams}"
+            ),
+        },
+    ]
+    return generate_text(messages)
+
+def render_engineering_note_pdf(original_code: str, analysis_text: str, diagram_text: str) -> io.BytesIO:
+    """Create an engineering note PDF for the fixed code."""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+    buffer,
+    pagesize=letter,
+    rightMargin=36,
+    leftMargin=36,
+    topMargin=36,
+    bottomMargin=36,
+    title="Engineering Note: Python Debugging Review",
+    )
+
+    styles = getSampleStyleSheet()
+
+    code_style = ParagraphStyle(
+        "CodeBlock",
+        parent=styles["Normal"],
+        fontName="Courier",
+        fontSize=8.5,
+        leading=10,
+        textColor=colors.HexColor("#111827"),
+        backColor=colors.HexColor("#f3f4f6"),
+        borderPadding=6,
+        spaceAfter=10,
+        alignment=TA_LEFT,
+    )
+
+    body_style = ParagraphStyle(
+        "Body",
+        parent=styles["Normal"],
+        fontSize=10,
+        leading=13,
+        spaceAfter=6,
+    )
+
+    heading_style = ParagraphStyle(
+        "Heading",
+        parent=styles["Heading2"],
+        textColor=colors.HexColor("#111827"),
+        spaceBefore=10,
+        spaceAfter=8,
+    )
+
+    story = [
+        Paragraph("Engineering Note: Python Debugging Review", styles["Title"]),
+        Spacer(1, 12),
+        Paragraph("Fixed Code Context", heading_style),
+        Preformatted(original_code, code_style),
+        Paragraph("Engineering Summary", heading_style),
+    ]
+
+    for line in analysis_text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("## "):
+            story.append(Paragraph(html.escape(line[3:]), heading_style))
+        else:
+            story.append(Paragraph(html.escape(line).replace("\n", "<br/>"), body_style))
+
+    story.append(Paragraph("Behavior Notes", heading_style))
+    story.append(Preformatted(diagram_text or "No diagrams available.", code_style))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
 
 def render_report_pdf(original_code: str, analysis_text: str, diagram_text: str) -> io.BytesIO:
     """Create a PDF report containing code, analysis, and architecture diagrams."""
@@ -295,6 +394,7 @@ def render_report_pdf(original_code: str, analysis_text: str, diagram_text: str)
     doc.build(story)
     buffer.seek(0)
     return buffer
+
 
 
 def build_ui():
@@ -428,6 +528,16 @@ def build_ui():
         analysis = output.object or ""
         diagrams = strip_fences(diagram_output.object or "")  # strip_fences handles the wrapper fence too
         return render_report_pdf(code, analysis, diagrams)
+    
+    def on_engineering_note():
+        code = code_input.value.strip()
+        if not code:
+            return render_engineering_note_pdf("", "No code provided.", "")
+
+        analysis = output.object or ""
+        diagrams = strip_fences(diagram_output.object or "")
+        note_text = generate_engineering_note(code, analysis, diagrams)
+        return render_engineering_note_pdf(code, note_text, diagrams)
 
     debug_btn.on_click(on_debug)      # Wire Debug button
     diagram_btn.on_click(on_diagram)  # Wire Diagram button
@@ -440,6 +550,15 @@ def build_ui():
         label="📥 Download Report",
         button_type="success",
         width=220,
+        height=50,
+    )
+    
+    engineering_note_btn = pn.widgets.FileDownload(
+        callback=on_engineering_note,
+        filename="engineering_note_python_debugging_review.pdf",
+        label="🧾 Download Engineering Note",
+        button_type="primary",
+        width=260,
         height=50,
     )
 
@@ -456,7 +575,7 @@ def build_ui():
         pn.layout.Divider(),
         pn.pane.Markdown("## Follow-up", styles=SECTION_STYLE),
         followup_input,
-        pn.Row(followup_btn, reset_btn, download_btn),
+        pn.Row(followup_btn, reset_btn, download_btn, engineering_note_btn),
         sizing_mode="stretch_width",
     )
 
