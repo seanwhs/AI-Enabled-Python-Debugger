@@ -1,5 +1,8 @@
 import os  # Access environment variables (e.g. API keys)
+import io  # In-memory file buffers for PDF download
+import html  # Escape text for safe PDF rendering
 import threading  # Run LLM streaming in a background thread
+import re  # Strip code fences from diagram output
 from dataclasses import dataclass  # Simple container for application state
 from typing import List, Dict, Optional  # Type hints
 
@@ -9,13 +12,17 @@ from openai import OpenAI  # OpenAI-compatible client (used with OpenRouter)
 from tornado.iostream import StreamClosedError  # Raised when browser disconnects
 from tornado.websocket import WebSocketClosedError  # Raised when websocket closes
 
-# Load environment variables from .env into the process
-load_dotenv()
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Preformatted
+from reportlab.lib.enums import TA_LEFT
+from reportlab.lib import colors
 
-# Initialize Panel and enable the CodeEditor component
-pn.extension("codeeditor", sizing_mode="stretch_width", design="bootstrap")
 
-# System prompt used for debugging requests
+load_dotenv()  # Load environment variables from .env into the process
+pn.extension("codeeditor", sizing_mode="stretch_width", design="bootstrap")  # Initialize Panel UI components
+
+
 SYSTEM_PROMPT = """You are an expert Python debugging assistant.
 When given Python code:
 1. Identify the bug.
@@ -31,27 +38,43 @@ Return your answer using these Markdown sections:
 ## Improvements
 """
 
-# Separate system prompt used for generating ASCII flow diagrams
+
 DIAGRAM_SYSTEM_PROMPT = """You are a software architecture expert.
-Generate TWO ASCII flowcharts, each wrapped in triple-backtick fenced code blocks.
-Label the first "Buggy Code Flow" and the second "Fixed Code Flow" inside the block.
-Use only ASCII characters: [], -->, |, and spaces for indentation.
-Do not add any prose, headers, or explanation outside the two code blocks.
+Generate TWO ASCII architecture diagrams using box-drawing characters.
+Label the first "=== Buggy Code Flow ===" and the second "=== Fixed Code Flow ===".
+
+Draw each diagram using only these characters:
+  +-------+   for box corners and edges
+  |       |   for vertical sides
+  +-->    |   for arrows between boxes
+  ^       v   for vertical arrows
+
+Example style:
+  +------------------+       +------------------+
+  | Input            |  -->  | Process          |
+  +------------------+       +------------------+
+                                      |
+                                      v
+                             +------------------+
+                             | Output           |
+                             +------------------+
+
+Wrap each diagram in a triple-backtick plain code block.
+Do not add any prose or explanation outside the two code blocks.
 """
 
-# Ordered list of fallback models.
-# If one model fails, the next one will automatically be tried.
+
 MODELS_POOL = [
     "openai/gpt-oss-20b:free",
     "cohere/north-mini-code:free",
     "meta-llama/llama-3.2-3b-instruct:free",
 ]
 
-# Session identifier used by Panel
-SESSION_KEY = "session_id"
-DEFAULT_SESSION = "default"
 
-# Common styling for markdown output panes
+SESSION_KEY = "session_id"  # Session identifier used by Panel
+DEFAULT_SESSION = "default"  # Fallback session id
+
+
 PANE_STYLE = {
     "font-size": "20px",
     "line-height": "1.9",
@@ -63,18 +86,17 @@ PANE_STYLE = {
     "border": "1px solid #374151",
 }
 
-# Styling dictionaries used throughout the UI
-TITLE_STYLE = {"font-size": "32px"}
-SECTION_STYLE = {"font-size": "24px"}
-INPUT_STYLE = {"font-size": "18px"}
-BUTTON_STYLE = {"font-size": "18px"}
 
-# Configure the OpenAI-compatible client to communicate with OpenRouter
-client = OpenAI(
-    api_key=os.getenv("OPENROUTER_API_KEY"),  # API key stored in .env
-    base_url="https://openrouter.ai/api/v1",  # OpenRouter endpoint
-    default_headers={
-        # Optional metadata shown by OpenRouter
+TITLE_STYLE = {"font-size": "32px"}  # Title text styling
+SECTION_STYLE = {"font-size": "24px"}  # Section header styling
+INPUT_STYLE = {"font-size": "18px"}  # Input widget styling
+BUTTON_STYLE = {"font-size": "18px"}  # Button widget styling
+
+
+client = OpenAI(  # OpenAI-compatible client configured for OpenRouter
+    api_key=os.getenv("OPENROUTER_API_KEY"),  # API key stored in environment
+    base_url="https://openrouter.ai/api/v1",  # OpenRouter API endpoint
+    default_headers={  # Optional metadata shown by OpenRouter
         "HTTP-Referer": "https://huggingface.co/spaces/seanwhs/AI-Enabled-Python-Debugger",
         "X-Title": "AI Enabled Python Debugger",
     },
@@ -83,8 +105,6 @@ client = OpenAI(
 
 @dataclass
 class AppState:
-    """Simple container for application configuration."""
-
     system_prompt: str = SYSTEM_PROMPT
     cache_key: str = DEFAULT_SESSION
 
@@ -100,20 +120,14 @@ def get_conv() -> List[Dict[str, str]]:
     Creates a new conversation if one doesn't exist.
     """
     sid = get_session_id()
-
-    if sid not in pn.state.cache:
-        # Initialize conversation with the system prompt
-        pn.state.cache[sid] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ]
-
+    if sid not in pn.state.cache:  # Initialize conversation on first use
+        pn.state.cache[sid] = [{"role": "system", "content": SYSTEM_PROMPT}]
     return pn.state.cache[sid]
 
 
 def safe_set(pane, text: str) -> bool:
     """
     Safely update a Panel pane.
-
     Returns False if the browser has disconnected.
     """
     try:
@@ -126,11 +140,9 @@ def safe_set(pane, text: str) -> bool:
 def call_llm(messages, stream: bool = False):
     """
     Send messages to the LLM.
-
     Automatically retries using fallback models if one fails.
     """
     last_error = None
-
     for model in MODELS_POOL:
         try:
             return client.chat.completions.create(
@@ -141,59 +153,125 @@ def call_llm(messages, stream: bool = False):
             )
         except Exception as e:
             last_error = e
-
     raise RuntimeError(f"All models failed: {last_error}")
 
 
-def stream_to_pane(messages: list, pane) -> None:
-    """
-    Stream the model response into a Markdown pane
-    without blocking the UI.
-    """
+def strip_fences(text: str) -> str:
+    """Remove all triple-backtick fences from model output."""
+    return re.sub(r"```[a-zA-Z0-9_-]*\n?", "", text).strip()
 
+
+def stream_to_pane(messages: list, pane, post_process=None) -> None:
+    """
+    Stream the model response into a pane without blocking the UI.
+    Optional post_process(text) -> text applied after streaming completes.
+    """
     def _run():
         try:
-            # Begin streaming from the LLM
-            stream = call_llm(messages, stream=True)
+            stream = call_llm(messages, stream=True)  # Begin streaming from the LLM
         except Exception as e:
             safe_set(pane, f"**Error:** {e}")
             return
 
         full = ""
-
         try:
-            # Read streamed tokens one chunk at a time
             for chunk in stream:
                 bit = getattr(chunk.choices[0].delta, "content", None)
-
-                # Ignore empty chunks
-                if not bit:
+                if not bit:  # Ignore empty chunks
                     continue
-
                 full += bit
-
-                # Stop if browser disconnects
-                if not safe_set(pane, full):
+                if not safe_set(pane, full):  # Stop if browser disconnects
                     return
-
         except (WebSocketClosedError, StreamClosedError):
             return
-
         except Exception as e:
             safe_set(pane, f"**Error:** {e}")
             return
 
-        # Save assistant response into conversation history
-        messages.append({"role": "assistant", "content": full})
+        if post_process:  # Apply cleanup after streaming completes
+            full = post_process(full)
+            safe_set(pane, full)
 
-    # Run streaming in the background to keep the UI responsive
-    threading.Thread(target=_run, daemon=True).start()
+        messages.append({"role": "assistant", "content": full})  # Save assistant response
+
+    threading.Thread(target=_run, daemon=True).start()  # Run streaming in the background
+
+
+def generate_text(messages: list) -> str:
+    """Generate a non-streaming LLM response."""
+    resp = call_llm(messages, stream=False)
+    return resp.choices[0].message.content or ""
+
+
+def render_report_pdf(original_code: str, analysis_text: str, diagram_text: str) -> io.BytesIO:
+    """Create a PDF report containing code, analysis, and architecture diagrams."""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=36,
+        leftMargin=36,
+        topMargin=36,
+        bottomMargin=36,
+    )
+    styles = getSampleStyleSheet()
+
+    code_style = ParagraphStyle(
+        "CodeBlock",
+        parent=styles["Normal"],
+        fontName="Courier",
+        fontSize=8.5,
+        leading=10,
+        textColor=colors.HexColor("#111827"),
+        backColor=colors.HexColor("#f3f4f6"),
+        borderPadding=6,
+        spaceAfter=10,
+        alignment=TA_LEFT,
+    )
+
+    body_style = ParagraphStyle(
+        "Body",
+        parent=styles["Normal"],
+        fontSize=10,
+        leading=13,
+        spaceAfter=6,
+    )
+
+    heading_style = ParagraphStyle(
+        "Heading",
+        parent=styles["Heading2"],
+        textColor=colors.HexColor("#111827"),
+        spaceBefore=10,
+        spaceAfter=8,
+    )
+
+    story = [
+        Paragraph("AI Python Debugger Report", styles["Title"]),
+        Spacer(1, 12),
+        Paragraph("Original Buggy Code", heading_style),
+        Preformatted(original_code, code_style),
+        Paragraph("Analysis", heading_style),
+    ]
+
+    for line in analysis_text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("## "):
+            story.append(Paragraph(html.escape(line[3:]), heading_style))
+        else:
+            story.append(Paragraph(html.escape(line).replace("\n", "<br/>"), body_style))
+
+    story.append(Paragraph("Architecture Diagrams", heading_style))
+    story.append(Preformatted(diagram_text or "No diagrams available.", code_style))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
 
 
 def build_ui():
     """Build and return the complete application interface."""
-
-    # Python code editor
     code_input = pn.widgets.CodeEditor(
         language="python",
         height=300,
@@ -202,7 +280,6 @@ def build_ui():
         margin=(10, 0, 15, 0),
     )
 
-    # Output panes
     output = pn.pane.Markdown(
         "_Analysis will appear here..._",
         sizing_mode="stretch_width",
@@ -215,14 +292,12 @@ def build_ui():
         styles=PANE_STYLE,
     )
 
-    # Text box for follow-up questions
     followup_input = pn.widgets.TextInput(
         placeholder="Ask a follow-up question...",
         sizing_mode="stretch_width",
         styles=INPUT_STYLE,
     )
 
-    # Application buttons
     debug_btn = pn.widgets.Button(
         name="⚡ Debug",
         button_type="primary",
@@ -257,45 +332,31 @@ def build_ui():
 
     def on_debug(_):
         """Handle Debug button click."""
-
         code = code_input.value.strip()
-
         if not code:
             safe_set(output, "Please enter some Python code.")
             return
 
-        # Add user code to conversation history
-        conv = get_conv()
+        conv = get_conv()  # Add user code to conversation history
         conv.append({"role": "user", "content": code})
-
         safe_set(output, "_Analyzing…_")
-
-        # Stream AI response
-        stream_to_pane(conv, output)
+        stream_to_pane(conv, output)  # Stream AI response
 
     def on_diagram(_):
-        """Generate ASCII diagrams."""
-
+        """Generate ASCII architecture diagrams."""
         code = code_input.value.strip()
-
         if not code:
             safe_set(diagram_output, "Please enter some Python code first.")
             return
 
         conv = get_conv()
-
-        # Retrieve the latest assistant response, if available
         last = next(
             (m["content"] for m in reversed(conv) if m["role"] == "assistant"),
             None,
         )
 
-        # Diagram generation uses its own prompt
         payload = [
-            {
-                "role": "system",
-                "content": DIAGRAM_SYSTEM_PROMPT,
-            },
+            {"role": "system", "content": DIAGRAM_SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": (
@@ -305,52 +366,56 @@ def build_ui():
             },
         ]
 
-        safe_set(diagram_output, "_Generating diagrams…_")
+        def wrap_as_codeblock(text: str) -> str:
+            """Strip fences then re-wrap so Markdown renders as preformatted monospace."""
+            cleaned = strip_fences(text)
+            return f"```\n{cleaned}\n```"
 
-        stream_to_pane(payload, diagram_output)
+        safe_set(diagram_output, "_Generating diagrams…_")
+        stream_to_pane(payload, diagram_output, post_process=wrap_as_codeblock)
 
     def on_followup(_):
         """Handle follow-up questions."""
-
         q = followup_input.value.strip()
-
         if not q:
             safe_set(output, "Please enter a question.")
             return
 
         conv = get_conv()
-
-        # Continue the existing conversation
-        conv.append({"role": "user", "content": q})
-
+        conv.append({"role": "user", "content": q})  # Continue the existing conversation
         safe_set(output, "_Thinking…_")
-
         stream_to_pane(conv, output)
 
     def on_reset(_):
         """Reset the application state."""
-
         sid = get_session_id()
-
-        # Start a fresh conversation
-        pn.state.cache[sid] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ]
-
-        # Restore default UI state
+        pn.state.cache[sid] = [{"role": "system", "content": SYSTEM_PROMPT}]  # Start a fresh conversation
         safe_set(output, "_Analysis will appear here..._")
         safe_set(diagram_output, "_Diagrams will appear here..._")
-
         followup_input.value = ""
         code_input.value = ""
 
-    # Wire button clicks to their handlers
-    debug_btn.on_click(on_debug)
-    diagram_btn.on_click(on_diagram)
-    followup_btn.on_click(on_followup)
-    reset_btn.on_click(on_reset)
+    def on_download():
+        """Generate the PDF report when the user clicks download."""
+        code = code_input.value.strip()
+        analysis = output.object or ""
+        diagrams = strip_fences(diagram_output.object or "")  # strip_fences handles the wrapper fence too
+        return render_report_pdf(code, analysis, diagrams)
 
-    # Assemble the interface
+    debug_btn.on_click(on_debug)      # Wire Debug button
+    diagram_btn.on_click(on_diagram)  # Wire Diagram button
+    followup_btn.on_click(on_followup)  # Wire Follow-Up button
+    reset_btn.on_click(on_reset)      # Wire Reset button
+
+    download_btn = pn.widgets.FileDownload(
+        callback=on_download,
+        filename="debug_report.pdf",
+        label="📥 Download Report",
+        button_type="success",
+        width=220,
+        height=50,
+    )
+
     return pn.Column(
         pn.pane.Markdown("# 🐍 AI Python Debugger", styles=TITLE_STYLE),
         code_input,
@@ -364,13 +429,10 @@ def build_ui():
         pn.layout.Divider(),
         pn.pane.Markdown("## Follow-up", styles=SECTION_STYLE),
         followup_input,
-        pn.Row(followup_btn, reset_btn),
+        pn.Row(followup_btn, reset_btn, download_btn),
         sizing_mode="stretch_width",
     )
 
 
-# Build the application
-app = build_ui()
-
-# Make the application available when served by Panel
-app.servable()
+app = build_ui()   # Build the application
+app.servable()     # Make the application available when served by Panel
