@@ -1,128 +1,191 @@
-# AI Python Debugger
+"""
+ui.py
+-----
+Builds the Panel UI and wires every button to its handler.
+All business logic is delegated to the other modules; this file only
+knows about widgets, layout, and how to plumb them together.
+"""
 
-> *Learn to Code, Code to Learn*
+import panel as pn
+from tornado.iostream import StreamClosedError
+from tornado.websocket import WebSocketClosedError
 
-This project began after a **PyCon for Educators** session where **Dr. Oka** demonstrated a Python debugger extension he had built. Watching AI inspect code, explain bugs, and guide programmers through the debugging process was genuinely exciting, and I wanted to build my own version.
+from config import (
+    DIAGRAM_SYSTEM_PROMPT,
+    PANE_STYLE, TITLE_STYLE, SECTION_STYLE, INPUT_STYLE, BUTTON_STYLE,
+)
+from llm_client import stream_to_pane, strip_fences
+from state import get_conversation, reset_conversation
+from note_generator import generate_engineering_note
+from pdf_renderer import render_report_pdf, render_engineering_note_pdf
 
-This repository is the result: an **AI-powered Python debugging assistant** that analyzes code, explains failures, suggests fixes, generates unit tests, writes engineering notes, and exports polished PDF reports.
 
-I built the application in Python using **Panel** for the interface, **OpenRouter** as the model gateway, and **ReportLab** for report generation.
+# ── Safe pane update ──────────────────────────────────────────────────────────
 
-## Features
+def _safe_set(pane, text: str) -> bool:
+    try:
+        pane.object = text
+        return True
+    except (WebSocketClosedError, StreamClosedError):
+        return False
 
-- **Code Editor:** Paste Python code directly into the browser.
-- **AI Analysis:** Identify bugs, explain root causes, and generate fixed code.
-- **Unit Test Suggestions:** Get test ideas for validating the fix.
-- **ASCII Flow Diagrams:** Generate buggy and fixed execution flow charts.
-- **Engineering Notes:** Export a formal technical note for the fix.
-- **PDF Reports:** Download a professional report of the debugging session.
-- **Follow-Up Questions:** Continue the conversation after the initial analysis.
-- **Session Reset:** Start a fresh debugging session anytime.
-- **Streaming Responses:** View model output as it arrives.
 
-## Tech Stack
+# ── UI factory ────────────────────────────────────────────────────────────────
 
-- **UI:** Panel
-- **LLM Gateway:** OpenRouter via the OpenAI Python SDK
-- **PDF Generation:** ReportLab
-- **Environment Management:** python-dotenv
+def build_ui() -> pn.Column:
+    """Construct and return the complete application layout."""
 
-## Project Structure
+    # ── Widgets ───────────────────────────────────────────────────────────────
+    code_input = pn.widgets.CodeEditor(
+        language="python",
+        height=300,
+        theme="monokai",
+        sizing_mode="stretch_width",
+        margin=(10, 0, 15, 0),
+    )
 
-```text
-.
-├── app.py             # Entry point: loads env, boots Panel, builds the UI
-├── config.py          # Static prompts, model pool, and UI styles
-├── llm_client.py      # OpenRouter client, fallback logic, and streaming helpers
-├── state.py           # Session ID and per-session conversation history
-├── note_generator.py  # Engineering note text generation
-├── pdf_renderer.py    # PDF creation with ReportLab
-├── ui.py              # Panel widgets, layout, and event handlers
-├── requirements.txt
-└── README.md
-```
+    output = pn.pane.Markdown(
+        "_Analysis will appear here..._",
+        sizing_mode="stretch_width",
+        styles=PANE_STYLE,
+    )
 
-## Module Design
+    diagram_output = pn.pane.Markdown(
+        "_Diagrams will appear here..._",
+        sizing_mode="stretch_width",
+        styles=PANE_STYLE,
+    )
 
-The codebase follows the **Single Responsibility Principle** so each module has one clear job.
+    followup_input = pn.widgets.TextInput(
+        placeholder="Ask a follow-up question...",
+        sizing_mode="stretch_width",
+        styles=INPUT_STYLE,
+    )
 
-- `app.py` loads environment variables, initializes Panel, imports the UI, and serves the app.
-- `config.py` holds pure configuration with no side effects.
-- `llm_client.py` owns all OpenRouter communication and streaming behavior.
-- `state.py` manages session-scoped conversation history in Panel cache.
-- `note_generator.py` builds the engineering note text by calling the LLM.
-- `pdf_renderer.py` turns strings into PDF byte buffers.
-- `ui.py` wires widgets, layout, and event handlers together.
+    debug_btn = pn.widgets.Button(
+        name="⚡ Debug", button_type="primary", width=200, height=50, styles=BUTTON_STYLE
+    )
+    diagram_btn = pn.widgets.Button(
+        name="📊 Diagram", button_type="warning", width=200, height=50, styles=BUTTON_STYLE
+    )
+    followup_btn = pn.widgets.Button(
+        name="💬 Follow-Up", button_type="success", width=200, height=50, styles=BUTTON_STYLE
+    )
+    reset_btn = pn.widgets.Button(
+        name="🗑️ Reset", button_type="danger", width=200, height=50, styles=BUTTON_STYLE
+    )
 
-This separation makes the app easier to test, safer to import, and simpler to extend.
+    # ── Event handlers ────────────────────────────────────────────────────────
 
-## Installation
+    def on_debug(_):
+        code = code_input.value.strip()
+        if not code:
+            _safe_set(output, "Please enter some Python code.")
+            return
+        conv = get_conversation()
+        conv.append({"role": "user", "content": code})
+        _safe_set(output, "_Analysing…_")
+        stream_to_pane(conv, output)
 
-1. Clone the repository:
+    def on_diagram(_):
+        code = code_input.value.strip()
+        if not code:
+            _safe_set(diagram_output, "Please enter some Python code first.")
+            return
 
-```bash
-git clone https://github.com/seanwhs/AI-Enabled-Python-Debugger.git
-cd AI-Enabled-Python-Debugger
-```
+        conv = get_conversation()
+        last_assistant = next(
+            (m["content"] for m in reversed(conv) if m["role"] == "assistant"),
+            None,
+        )
 
-2. Create a virtual environment:
+        payload = [
+            {"role": "system", "content": DIAGRAM_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Code:\n```python\n{code}\n```"
+                    + (f"\n\nAnalysis:\n{last_assistant}" if last_assistant else "")
+                ),
+            },
+        ]
 
-```bash
-python -m venv .venv
-source .venv/bin/activate  # Or .venv\Scripts\activate on Windows
-```
+        def _wrap_as_codeblock(text: str) -> str:
+            return f"```\n{strip_fences(text)}\n```"
 
-3. Install dependencies:
+        _safe_set(diagram_output, "_Generating diagrams…_")
+        stream_to_pane(payload, diagram_output, post_process=_wrap_as_codeblock)
 
-```bash
-pip install -r requirements.txt
-```
+    def on_followup(_):
+        q = followup_input.value.strip()
+        if not q:
+            _safe_set(output, "Please enter a question.")
+            return
+        conv = get_conversation()
+        conv.append({"role": "user", "content": q})
+        _safe_set(output, "_Thinking…_")
+        stream_to_pane(conv, output)
 
-4. Configure OpenRouter:
+    def on_reset(_):
+        reset_conversation()
+        _safe_set(output, "_Analysis will appear here..._")
+        _safe_set(diagram_output, "_Diagrams will appear here..._")
+        followup_input.value = ""
+        code_input.value = ""
 
-```env
-OPENROUTER_API_KEY=your_api_key_here
-```
+    def on_download():
+        code     = code_input.value.strip()
+        analysis = output.object or ""
+        diagrams = strip_fences(diagram_output.object or "")
+        return render_report_pdf(code, analysis, diagrams)
 
-5. Run the app:
+    def on_engineering_note():
+        code = code_input.value.strip()
+        if not code:
+            return render_engineering_note_pdf("", "No code provided.", "")
+        analysis = output.object or ""
+        diagrams  = strip_fences(diagram_output.object or "")
+        note_text = generate_engineering_note(code, analysis, diagrams)
+        return render_engineering_note_pdf(code, note_text, diagrams)
 
-```bash
-panel serve app.py
-```
+    # ── Wire buttons ──────────────────────────────────────────────────────────
+    debug_btn.on_click(on_debug)
+    diagram_btn.on_click(on_diagram)
+    followup_btn.on_click(on_followup)
+    reset_btn.on_click(on_reset)
 
-Open `http://localhost:5006/app` in your browser.
+    download_btn = pn.widgets.FileDownload(
+        callback=on_download,
+        filename="debug_report.pdf",
+        label="📥 Download Report",
+        button_type="success",
+        width=220,
+        height=50,
+    )
 
-## Live Deployment
+    engineering_note_btn = pn.widgets.FileDownload(
+        callback=on_engineering_note,
+        filename="engineering_note_python_debugging_review.pdf",
+        label="🧾 Download Engineering Note",
+        button_type="primary",
+        width=260,
+        height=50,
+    )
 
-You can try the app on Hugging Face in two ways:
-
-- **Space page:** [https://huggingface.co/spaces/seanwhs/AI-Enabled-Python-Debugger](https://huggingface.co/spaces/seanwhs/AI-Enabled-Python-Debugger)
-- **Direct app URL:** [https://seanwhs-ai-enabled-python-debugger.hf.space](https://seanwhs-ai-enabled-python-debugger.hf.space)
-
-If the direct link appears blank, open the Space page first and wait for the app to wake up.
-
-## What I Learned
-
-Building this project was about more than calling an LLM API. I focused on:
-
-- **State management:** keeping per-session conversation history in Panel cache.
-- **Async responsiveness:** streaming responses without freezing the UI.
-- **Reliable model access:** using OpenRouter with fallback models.
-- **Document generation:** assembling structured PDFs programmatically.
-- **Software design:** separating configuration, transport, state, UI, and rendering concerns.
-
-## Future Improvements
-
-- Upload `.py` files directly into the UI.
-- Analyze multi-file projects.
-- Add support for more languages such as JavaScript, Go, and C++.
-- Add richer code diff presentation in the reports.
-- Improve prompt-driven note formatting for more consistent engineering summaries.
-
-## Acknowledgements
-
-This project was inspired by **Dr. Oka** during the **PyCon for Educators** session. It reminded me that the best conference takeaways are often the projects you feel compelled to build afterward.
-
-## License
-
-This project is licensed under the [MIT License](https://opensource.org/licenses/MIT).
+    # ── Layout ────────────────────────────────────────────────────────────────
+    return pn.Column(
+        pn.pane.Markdown("# 🐍 AI Python Debugger", styles=TITLE_STYLE),
+        code_input,
+        pn.Row(debug_btn, diagram_btn),
+        pn.layout.Divider(),
+        pn.pane.Markdown("## Analysis", styles=SECTION_STYLE),
+        output,
+        pn.layout.Divider(),
+        pn.pane.Markdown("## Diagrams", styles=SECTION_STYLE),
+        diagram_output,
+        pn.layout.Divider(),
+        pn.pane.Markdown("## Follow-up", styles=SECTION_STYLE),
+        followup_input,
+        pn.Row(followup_btn, reset_btn, download_btn, engineering_note_btn),
+        sizing_mode="stretch_width",
+    )
